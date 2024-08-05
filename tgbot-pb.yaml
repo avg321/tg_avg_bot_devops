@@ -1,0 +1,112 @@
+- name: bot running
+  hosts: bot
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: install pithon3-pip
+      apt:
+        name:
+          - python3-pip
+        state: present
+
+    - name: install python moduls
+      shell: pip3 install paramiko psycopg2-binary python-dotenv python-telegram-bot==13.7
+
+    - name: copy bot files
+      copy:
+        src: /home/user/bot
+        dest: /home/ansible/bot
+        owner: ansible
+        group: ansible
+        mode: '777'
+
+    - name: running bot
+      shell: python3 /home/ansible/bot/tgbot.py &
+
+- name: db1 install and config
+  hosts: db1
+  become: yes
+  gather_facts: no
+  tasks:
+
+    - name: PG install
+      apt:
+        name:
+           - postgresql
+           - postgresql-contrib
+        state: latest
+
+    - name: PG enable
+      systemd:
+        name: postgresql
+        state: started
+        enabled: yes
+
+    - name: postgres password update
+      shell: sudo -u postgres psql -c "ALTER USER postgres WITH password 'Qq12345';"
+    - name: change in postgresql.conf
+      lineinfile:
+         path: /etc/postgresql/14/main/postgresql.conf
+         regexp: "{{ item.regexp }}"
+         line: "{{ item.line }}"
+      with_items:
+         - { regexp: "#listen_addresses = 'localhost'", line: "listen_addresses = '*'"}
+         - { regexp: '#wal_level = replica', line: 'wal_level = replica' }
+         - { regexp: '#archive_mode = off', line: 'archive_mode = on' }
+         - { regexp: "#archive_command = '''", line: "archive_command = 'cp %p /oracle/pg_data/archive/%f'"}
+         - { regexp: '#max_wal_senders = 10', line: 'max_wal_senders = 10' }
+         - { regexp: '#wal_log_hints = off', line: 'wal_log_hints = on' }
+    - name: change in pg_hba.conf
+      blockinfile:
+         path: /etc/postgresql/14/main/pg_hba.conf
+         insertafter: 'host    replication     all             ::1/128                 md5'
+         block: |
+            host  replication all 0.0.0.0/0 scram-sha-256
+            host  all all 0.0.0.0/0 password
+
+
+    - name:  create replication user
+      shell: sudo -u postgres psql -c "CREATE USER repl_user WITH REPLICATION ENCRYPTED PASSWORD 'repl_password';"
+
+    - name:  create bot DB
+      shell: sudo -u postgres psql -c "CREATE database tg_bot OWNER postgres;"
+
+    - name:  create email table
+      shell: sudo -u postgres psql -d tg_bot -c "CREATE TABLE IF NOT EXISTS email_tab(ID SERIAL PRIMARY KEY, email VARCHAR (100) NOT NULL);"
+
+    - name:  create phone numbers table
+      shell: sudo -u postgres psql -d tg_bot -c "CREATE TABLE IF NOT EXISTS phone_tab(ID SERIAL PRIMARY KEY, phone VARCHAR (100) NOT NULL);"
+
+    - name: PG restart
+      systemd:
+         name: postgresql
+         enabled: yes
+         state: restarted
+
+- name: db2 install and config
+  hosts: db2
+  become: yes
+  gather_facts: no
+  tasks:
+    - name: PG install
+      apt:
+        name:
+          - postgresql
+          - postgresql-contrib
+        state: latest
+    - name: PG stop
+      systemd:
+        name: postgresql
+        state: stopped
+
+    - name: remove files
+      shell: rm -rf /var/lib/postgresql/14/main/*
+
+    - name: Backup initial data from master
+      shell: su - postgres -c "PGPASSWORD='repl_password' pg_basebackup -R -h 192.168.88.192 -U repl_user -D /var/lib/postgresql/14/main -P"
+
+    - name: PG start
+      systemd:
+        name: postgresql
+        state: started
